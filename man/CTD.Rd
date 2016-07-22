@@ -4,7 +4,7 @@
 \name{CTD}
 \alias{CTD}
 \title{Comparative toxicogenomics database list}
-\format{A list with 1166 elements, with names corresponding to compounds and
+\format{A list with 1076 elements, with names corresponding to compounds and
   list items corresponding to gene symbols}
 \description{
 A list object containing drug::gene interactions based on the CTD and

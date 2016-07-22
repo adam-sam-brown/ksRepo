@@ -1,2 +1,10 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+AML\/*
+raw\/*
+PC\/*
+\.git\/*
+LICENSE
+README\.md
+schwannoma\/*
+drugbank_approved.RData

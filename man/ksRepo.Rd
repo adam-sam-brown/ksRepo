@@ -33,7 +33,4 @@ A data frame with C rows and 5 columns, where C is the number of
 \code{ksRepo} performs KS-based repositioning of user supplied data. KS values
 are assigned p-values by bootstrapping the user supplied datasets.
 }
-\examples{
-1+1
-}
 

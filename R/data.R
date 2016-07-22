@@ -6,6 +6,6 @@
 #' @docType data
 #' @keywords datasets
 #' @note Data sources downloaded April 21, 2016.
-#' @format A list with 1166 elements, with names corresponding to compounds and
+#' @format A list with 1076 elements, with names corresponding to compounds and
 #'   list items corresponding to gene symbols
 NULL

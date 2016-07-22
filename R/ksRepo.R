@@ -18,7 +18,6 @@
 #'  gives the number of genes associated with each compound. ks gives the raw ks
 #'  statistic, boot.p gives the bootstrapped p-value, and boot.fdr gives the
 #'  fdr-corrected bootstrapped p-value.
-#'@examples 1+1
 #'@export
 ksRepo <- function(ccgenes, database, boot.method='compound', nboot = 10000) {
     # Ensure compatibility
@@ -99,7 +98,7 @@ ks_boot_comp <- function(genes, db, nboot, n.genes, ks) {
 
 ks_boot_inst <- function(genes, db, nboot, ks) {
     # Resample case/control list
-    p <- rep(NA, length(db))
+    p <- rep(0, length(db))
     for (i in 1:nboot) {
         this.sample <- sample(genes, length(genes))
         this.ks <- sapply(db, function(x) ks_single(this.sample,x))
