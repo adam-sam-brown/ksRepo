@@ -1,0 +1,200 @@
+---
+title: "ksRepo"
+subtitle: "Getting the most out of your data with ksRepo drug repositioning"
+author: "Adam Brown"
+date: "May 17, 2017"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Welcome to an introduction to the `ksRepo` package. `ksRepo` enables investigators to mix and match various types of case/control gene lists with any gene::drug interaction database to predict repositioning oportunities. This document will introduce you to the kinds of data you'll need to use ksRepo, and walk you through some techniques for obtaining it.
+
+More information about `ksRepo` is available in open-access form at _[BMC Bioinformatics](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/s12859-016-0931-y)_.
+
+### Getting Started
+
+In order to use `ksRepo`, you'll need to first install and load it into your R environment. You can either do so by downloading/forking the [GitHub Repository](http://github.com/adam-sam-brown/ksRepo) and installing it manually (for experienced users) or by using the `Devtools` package:
+
+```{r getting_started, eval=FALSE}
+# Install devtools if necessary
+install.packages('devtools')
+
+# Load the package
+require(devtools)
+
+# Download and install ksRepo from GitHub directly
+install_github('adam-sam-brown/ksRepo')
+library(ksRepo)
+
+```
+
+We will also install some additional packages to be used over the course of this introduction:
+
+```{r getting_started2, eval=FALSE}
+# Get Bioconductor to enable package installation
+install.packages('BiocInstaller')
+require('BiocInstaller')
+
+# Install packages
+biocLite(c('rmeta', 'GEOquery', 'Biobase')
+
+# Load into memory
+require(GEOquery)
+require(rmeta)
+require(Biobase)
+```
+
+### Preparing your gene list
+
+`ksRepo` requires as input a list of genes ordered by statistical significance. Statistical significance can be defined by, for example, differential expression between normal and disease samples, as in this introduction. For this analysis, we're going to use publically available data from the [Gene Expression Omnibus](https://www.ncbi.nlm.nih.gov/geo/). The analysis we'll be performing is based off of GEO's built-in `GEO2R` tool.
+
+The dataset we'll be using is `GSE39645`, a series of microarray experiments on normal human nerve tissue, and tumor tissue from vestibular schwannoma (VS) patients. VS is a rare tumor syndrome characterized by schwann cell tumors in the inner ear, which lead to dizziness and sensorineural deficits.
+
+To begin, we'll download the dataset directly from GEO using the `GEOquery` package:
+
+```{r getGeo, eval=FALSE}
+# Load series and platform data from GEO
+gset <- getGEO("GSE39645", GSEMatrix =TRUE, AnnotGPL=TRUE)
+gset <- gset[[1]]
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+```
+
+Once we have the data, we can perform simple differential gene expression analysis on the probe-level using `limma`:
+
+```{r limma, eval=FALSE}
+# Set normal/tumor tissue identifiers
+gsms <- "0000000001111111111111111111111111111111"
+sml <- c()
+for (i in 1:nchar(gsms)) { sml[i] <- substr(gsms,i,i) }
+sml <- paste("G", sml, sep="")    # set group names
+fl <- as.factor(sml)
+gset$description <- fl
+design <- model.matrix(~ description + 0, gset)
+colnames(design) <- levels(fl)
+
+# Perform simple limma analysis
+fit <- lmFit(gset, design)
+cont.matrix <- makeContrasts(G1-G0, levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2, 0.01)
+
+# Get relevant information for further analysis
+tT <- topTable(fit2, adjust="fdr", sort.by="B", number=17587)
+tT <- subset(tT, select=c("ID","t","Gene.symbol"))
+tT$Gene.symbol <- as.character(tT$Gene.symbol)
+```
+
+Now we have a list of differentially expressed _probes_, but not _genes_, so we need to combine them together. To do this, we'll perform a _fixed effects meta analysis_ to consolidate probes to genes. First, we'll define some useful functions
+
+```{r functions, eval=FALSE}
+# Back out Cohen's d-statistics for meta-analysis
+dfromt <- function(t, n1, n2) {
+    df <- n1 + n2 - 2
+    d <- (2*t) / sqrt(df)
+    return(d)
+}
+
+sefromt <- function(t, n1, n2) {
+    d <- dfromt(t, n1, n2)
+    var <- ( (n1 + n2)/(n1*n2) + d^2/(2*(n1+n2-2)) ) * ((n1 + n2)/(n1 + n2 - 2))
+    se <- sqrt(var)
+    return(se)
+}
+
+# Perform gene-level fixed-effects meta analysis
+meta <- function(gFr, nSamp) {
+    # Parse Gene Names
+    genel <- strsplit(gFr$Gene.symbol, split='///')
+    names(genel) <- gFr$ID
+    genel <- lapply(genel, unique)
+
+    # Annotate with IDs
+    gene <- setNames(unlist(genel, use.names=F),rep(names(genel), lengths(genel)))
+    gene <- data.frame(gene=gene, probe=names(gene), stringsAsFactors = F)
+
+    # Output Init
+    omni <- data.frame(gene = unique(unlist(genel)), stringsAsFactors = F)
+    omni$d <- rep(NA, nrow(omni))
+    omni$se <- rep(NA, nrow(omni))
+    omni$p <- rep(NA, nrow(omni))
+
+    # Output loop
+    for (i in 1:nrow(omni)) {
+        probes <- subset(gene, gene==omni$gene[i])$probe
+        slice <- subset(gFr, ID %in% probes)
+        metasum <- meta.summaries(slice$d,slice$se) # Fixed-effects meta-analysis of probe values
+        omni$d[i] <-metasum$summary
+        omni$se[i] <- metasum$se.summary
+        omni$p[i] <- 2*pnorm(-abs(omni$d[i]*sqrt(nSamp))) # Two-sided p-value from d-statistic
+    }
+    omni <- omni[order(omni$p),]
+}
+```
+
+With these functions defined, we can easily convert our probe list into a gene list:
+
+```{r meta, eval=FALSE}
+# Remove unmapped probes
+tT <- subset(tT, Gene.symbol != '')
+
+# Effect sizes and standard errors
+tT$d <- dfromt(tT$t, 9, 31) # 9 normal and 31 tumor samples
+tT$se <- sefromt(tT$t, 9, 31)
+
+# Convert probe- to gene-level differential expression
+dge <- meta(tT, 40)
+genelist <- dge$gene
+```
+
+We're now all set to perform our `ksRepo` analysis.
+
+### ksRepo analysis and interpretation
+
+With our sorted gene list, we can move on to `ksRepo` analysis. We'll be using the built in [Comparative Toxicogenomics Database](http://ctdbase.org) (CTD) dataset, which contains a set of expert-curated gene::drug interactions. `ksRepo` automatically selects a subset of the CTD that overlaps with our gene list, making running ksRepo as easy as a single line of code:
+
+```{r ksrepo, eval=FALSE}
+# Fetch the CTD data
+data(CTD)
+
+# Run in a single line (on most computers should take < 1 hour)
+results <- ksRepo(genelist, CTD) # Beyond the default options, you can change the number of resamples performed
+                                 # As well as the type of resamples (resampling compound lists or your input)
+```
+
+Once you've run a ksRepo analysis, it's time to look at the results. `ksRepo` outputs a `data.frame` with columns for:
+1. compound name, which exactly corresponds to an entry in [drugbank](http://drugbank.ca)
+2. the number of genes interacting with a compound in the CTD (or your own database)
+3. enrichment score (ks, for Kolmogorov-Smirnov enrichment)
+4. a bootstrapped p-value (# of times bootstrapped ks exceeds actual ks)
+5. an FDR q-value
+
+A good rule of thumb for `ksRepo` analysis is to look first at your FDR significant results and subset from there:
+```{r resultsload, echo=FALSE}
+load('data.RDAta')
+
+```
+
+```{r results}
+# Significant
+subset(results, boot.fdr < 0.05)
+
+# Significant and highly enriched
+subset(results, boot.fdr < 0.05 & ks > 0.2)
+
+# Significant, highly enriched, with known interactions with multiple target genes
+subset(results, boot.fdr < 0.05 & ks > 0.2 & n.genes > 1)
+```
+
+### Wrapping Up
+
+In this introduction, we're worked through an example of repositioning using `ksRepo`. We first downloaded freely accessible gene expression data and pre-processed it for `ksRepo` analysis. We then performed `ksRepo` analysis in a single line of code and examined the results.
+
+`ksRepo` provides an easy and accessible way to perform drug repositioning with any data, and without a lot of the hassle of other methods.
+
+### Contact
+
+If you're interested in learning more about `ksRepo` or licensing our software, please email [Adam Brown](mailto:adam.sam.brown@gmail.com).
