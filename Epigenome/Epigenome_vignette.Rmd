@@ -1,0 +1,161 @@
+---
+title: "Epigenome-Based Repositioning with ksRepo"
+author: "Adam Brown"
+date: "July 12, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Welcome to an introduction to using the `ksRepo` package with epigenomic data. This tutorial assumes that you've already gone through our [introductory vignette](https://rawgit.com/adam-sam-brown/ksRepo/master/vignette/vignette.html), so if you haven't done so, take a look before continuing.
+
+### Getting Started
+
+As before, we'll install `ksRepo` and some additional packages we'll need for performing epigenome-based repositioning with `ksRepo`.
+
+```{r getting_started, eval=FALSE}
+# Install devtools if necessary
+install.packages('devtools')
+
+# Load the package
+require(devtools)
+
+# Download and install ksRepo from GitHub directly
+install_github('adam-sam-brown/ksRepo')
+library(ksRepo)
+
+# Get Bioconductor to enable package installation
+install.packages('BiocInstaller')
+require('BiocInstaller')
+
+# Install packages
+biocLite(c('GEOquery', 'EmpiricalBrownsMethod')
+
+# Load into memory
+require(ksRepo)
+require(GEOquery)
+require(EmpiricalBrownsMethod)
+```
+
+### Preparing your gene list
+
+`ksRepo` requires as input a list of genes ordered by statistical significance. For this analysis, we're going to use publically available data from the [Gene Expression Omnibus](https://www.ncbi.nlm.nih.gov/geo/) using DNA Methylation data from Illumina's Infinium HumanMethylation450 chip (commonly referred to as the '450K' chip).
+
+We'll be using two datasets for this exercise, GSE58477 and GSE63409, both of which are 450K-based studies of Acute Myeloid Leukemia. We'll be using pre-processed GEO2R data to save time and load in an annotation file for the 450K chip from Illumina's website. You can download these files from [FigShare](http://dx.doi.org/10.6084/m9.figshare.5202445) (not hosted on GitHub due to file size).
+
+```{r getGeo, eval=FALSE}
+## Annotation file
+load('annot.RData')
+
+## GSE58477
+# Read
+geo2r.GSE58477 <- read.table('GSE58477_geo2r.txt', header=T, stringsAsFactors = F)
+
+# geoQuery
+expr.GSE58477 <- exprs(getGEO('GSE58477')$GSE58477_series_matrix.txt.gz)
+row.names(expr.GSE58477) <- annot$IlmnID
+
+## GSE63409
+
+# Read
+geo2r.GSE63409 <- read.table('GSE63409_geo2r.txt', header=T, stringsAsFactors = F)
+
+# geoQuery
+expr.GSE63409 <- exprs(getGEO('GSE63409')$GSE63409_series_matrix.txt.gz)
+row.names(expr.GSE63409) <- annot$IlmnID
+```
+
+Once we have the data, we need to get it into a format that `ksRepo` can use. We'll do so with the following function, which takes in the loaded GEO2R dataset, the full data matrix downloaded from GEO using the `GEOQuery` package, and the manufacturer annotation file we loaded in earlier. This function could be easily adapted to other data types, assuming there's a consistent probe:gene annotation file available (note: this could be derived from sequencing alignments too!).
+
+This function makes use of the `EmpiricalBrownsMethod` package, which combines p-values (from differential methylation in this case) that are highly correlated (from probes mapping to the same gene).
+
+```{r fun, eval=FALSE}
+geoMethylation <- function(geo2r, expr, annot) {
+    # Annotation
+    geo2r<- subset(merge(geo2r, annot, by.x = 'ID', by.y = 'IlmnID', all = F),
+                   select = c('ID', 'UCSC_RefGene_Name', 'adj.P.Val'))
+    geo2r<- subset(geo2r, geo2r$UCSC_RefGene_Name != '')
+
+    # Gene name harmonization
+    cpgl <- strsplit(geo2r$UCSC_RefGene_Name, ';') # Genes by CpG
+    names(cpgl) <- geo2r$ID
+    cpgl <- lapply(cpgl,unique) # Remove duplicates
+    cpgl <- cpgl[lapply(cpgl,length)!=0] # Remove unanotated
+
+    gene <- setNames(unlist(cpgl, use.names=F),rep(names(cpgl), lengths(cpgl)))
+    gene <- data.frame(gene=gene, cpg=names(gene), stringsAsFactors = F)
+
+    # Omnibus statistic calculation
+    omni <- data.frame(gene = unique(unlist(cpgl)), stringsAsFactors = F)
+    omni$n.cpgs <- rep(NA, nrow(omni))
+    omni$browns.p <- rep(NA, nrow(omni))
+
+    for (i in 1:nrow(omni)) { # Get minimum p-value for each gene for each condition
+        cpgs <- subset(gene, gene==omni$gene[i])$cpg
+        slice <- subset(geo2r, ID %in% cpgs)
+        slice.mat <- expr[slice$ID,,drop = F]
+        # Impute missing data with median value across samples
+        slice.mat[which(is.na(slice.mat))] <- apply(which(is.na(slice.mat), arr.ind = T),
+                                                    1,
+                                                    function(x) median(slice.mat[x[1],], na.rm = T))
+        omni[i,2] <- nrow(slice)
+        omni[i,3] <- tryCatch(empiricalBrownsMethod(slice.mat, slice$adj.P.Val),
+                              error = function(e) slice$adj.P.Val)
+    }
+
+    omni$bonf <- p.adjust(omni$browns.p, 'bonferroni')
+    omni <- omni[order(omni$browns.p),]
+
+    # Return
+    return(omni)
+}
+```
+
+With this function in hand, we can convert our raw input into `ksRepo`-usable format:
+
+```{r browns, eval=FALSE}
+## Gene list generation
+GL.GSE58477 <- geoMethylation(geo2r.GSE58477, expr.GSE58477, annot)$gene
+GL.GSE63409 <- geoMethylation(geo2r.GSE63409, expr.GSE63409, annot)$gene
+```
+
+### ksRepo analysis and interpretation
+
+With our sorted gene list, we can move on to `ksRepo` analysis. We'll be using the built in [Comparative Toxicogenomics Database](http://ctdbase.org) (CTD) dataset as before:
+
+```{r ksrepo, eval=FALSE}
+# Fetch the CTD data
+data(CTD)
+
+# Run in a single line (on most computers should take < 1 hour)
+ks.GSE58477 <- ksRepo(GL.GSE58477, CTD) # Beyond the default options, you can change the number of resamples performed
+                                 # As well as the type of resamples (resampling compound lists or your input)
+ks.GSE63409 <- ksRepo(GL.GSE63409, CTD)
+```
+
+For this example, we're going to compare the results from our two datasets:
+```{r resultsload, echo=FALSE}
+load('ks_GSE58477.RData')
+load('ks_GSE63409.RData')
+
+```
+
+```{r results}
+# Combine results into a single data.frame
+combo <- merge(ks.GSE58477.comp, ks.GSE63409.comp, by='compound', suffixes = c('.GSE58477', '.GSE63409'))
+
+# Check for significant drugs in both datasets
+subset(combo, boot.fdr.GSE58477 < 0.05 & boot.fdr.GSE63409 < 0.05)
+```
+
+### Wrapping Up
+
+In this introduction, we're worked through an example of repositioning using epigenomic data, and more sepcifically DNA Methylation data with `ksRepo`. We first downloaded freely accessible DNA Methylation data and pre-processed it for `ksRepo` analysis. We then performed `ksRepo` analysis in a single line of code and compared the results from our two datasets to identify robust repositioning candidates.
+
+`ksRepo` provides an easy and accessible way to perform drug repositioning with any data, and without a lot of the hassle of other methods.
+
+### Contact
+
+If you're interested in learning more about `ksRepo` or licensing our software, please email [Adam Brown](mailto:adam.sam.brown@gmail.com).
